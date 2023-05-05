@@ -1,0 +1,20 @@
+POST http://localhost:5243/purchases
+Content-Type: application/json
+
+[
+    {
+        "firstName": "derntleacher",
+        "lastName": "Bubble",
+        "ticketTypeID": 4
+    },
+    {
+        "firstName": "regular",
+        "lastName": "Schnabbl",
+        "ticketTypeID": 1
+    }
+        {
+        "firstName": "busy",
+        "lastName": "galois",
+        "ticketTypeID": 2
+    }
+]

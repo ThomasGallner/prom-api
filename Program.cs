@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,14 +12,175 @@ app.MapGet("/ticket-types", async (PromContext context) =>
     return Results.Ok(ticketTypes.Select(tt => new TicketTypeResult(tt.ID, tt.Name, tt.Price)));
 });
 
-app.MapPost("/students", ([FromBody] string csv) =>
+app.MapPost("/students", async (HttpRequest request, PromContext context) =>
 {
-    return Results.Ok(csv);
+    if (!request.ContentType!.StartsWith("text/plain"))
+    {
+        return Results.BadRequest();
+    }
+
+    using var stream = new StreamReader(request.Body);
+
+    // ignore first line (header)
+    await stream.ReadLineAsync();
+    string? line;
+
+    while ((line = await stream.ReadLineAsync()) != null)
+    {
+        var cols = line.Split(',');
+        var invitationCode = cols[5];
+
+        if (!await context.Students.AnyAsync(s => s.InvitationCode == invitationCode))
+        {
+            var student = new Student
+            {
+                InvitationCode = invitationCode,
+            };
+
+            await context.Students.AddAsync(student);
+        }
+    }
+
+    await context.SaveChangesAsync();
+
+    return Results.Ok();
 });
 
-app.MapPost("/teachers", () => { throw new NotImplementedException(); });
+#region Advanced Solution
+// (/teachers missing) (writer)
 
-app.MapPost("/purchases", () => { throw new NotImplementedException(); });
+// app.MapPost("/students", async (HttpRequest request, PromContext context) =>
+//     await ImportFromCsv(request, context, async (cols, context) => {
+//         var invitationCode = cols[5];
+
+//         if (!await context.Students.AnyAsync(s => s.InvitationCode == invitationCode))
+//         {
+//             var student = new Student
+//             {
+//                 InvitationCode = invitationCode,
+//             };
+
+//             await context.Students.AddAsync(student);
+//         }
+//     }));
+
+// async Task<IResult> ImportFromCsv(HttpRequest request, PromContext context, Func<string[], PromContext, Task> writer)
+// {
+//     if (!request.ContentType!.StartsWith("text/plain"))
+//     {
+//         return Results.BadRequest();
+//     }
+
+//     using var stream = new StreamReader(request.Body);
+
+//     // ignore first line (header)
+//     await stream.ReadLineAsync();
+//     string? line;
+
+//     while ((line = await stream.ReadLineAsync()) != null)
+//     {
+//         var cols = line.Split(',');
+//         await writer(cols, context);
+//     }
+
+//     await context.SaveChangesAsync();
+
+//     return Results.Ok();
+// }
+#endregion
+
+app.MapPost("/teachers", async (HttpRequest request, PromContext context) =>
+{
+    if (!request.ContentType!.StartsWith("text/plain"))
+    {
+        return Results.BadRequest();
+    }
+
+    using var stream = new StreamReader(request.Body);
+
+    // ignore first line (header)
+    await stream.ReadLineAsync();
+    string? line;
+
+    while ((line = await stream.ReadLineAsync()) != null)
+    {
+        var cols = line.Split(',');
+        var invitationCode = cols[5];
+
+        if (!Boolean.TryParse(cols[4], out var teacherOf5thGrade))
+        {
+            continue;
+        }
+
+        if (!await context.Teachers.AnyAsync(t => t.InvitationCode == invitationCode))
+        {
+            var teacher = new Teacher
+            {
+                InvitationCode = invitationCode,
+                TeacherOf5thGrade = teacherOf5thGrade,
+            };
+
+            await context.Teachers.AddAsync(teacher);
+        }
+    }
+
+    await context.SaveChangesAsync();
+
+    return Results.Ok();
+});
+
+app.MapPost("/purchases", async (List<AddTicketRequestDto> ticketRequests, PromContext context) =>
+{
+    var purchase = new Purchase
+    {
+        TotalPrice = 0,
+    };
+
+    foreach (var ticketRequest in ticketRequests)
+    {
+        var ticket = new Ticket
+        {
+            FirstName = ticketRequest.FirstName,
+            LastName = ticketRequest.LastName,
+            TicketTypeID = ticketRequest.TicketTypeID,
+        };
+
+        var ticketType = await context.TicketTypes.FirstAsync(tt => tt.ID == ticket.TicketTypeID);
+        purchase.TotalPrice += ticketType.Price;
+
+        // invitation code needed
+        if (ticketType.ID == (int)TicketTypeIDs.Student)
+        {
+            var student = await context.Students.FirstAsync(s => s.InvitationCode == ticketRequest.InvitationCode);
+
+            if (student == null)
+            {
+                return Results.BadRequest();
+            }
+
+            ticket.Student = student;
+
+            // TODO check amount of invitation code usage
+            // code below won't work
+            // student.Tickets.Count
+            /*  Latest objective that was worked on
+                The API must support buying tickets. It must be possible to buy multiple tickets in a single API request. The following data is required when tickets are bought:
+                    First name of guest
+                    Last name of guest
+                    Ticket type
+                    Invitation code (if required for the ticket type)
+            */
+        }
+
+        purchase.Tickets.Add(ticket);
+    }
+
+    await context.Purchases.AddAsync(purchase);
+    await context.SaveChangesAsync();
+
+    // temp return -> so that the code is compilable
+    return Results.Ok();
+});
 
 app.MapGet("/purchases/{id}", (string lastName, int id) => { throw new NotImplementedException(); });
 
@@ -31,10 +191,8 @@ app.MapGet("/purchases/statistics", () => { throw new NotImplementedException();
 app.Run();
 
 
-record AddStudentDto(int StudentID, string InvitationCode);
-record AddTeacherDto(int TeacherID, string InvitationCode, bool Teaches5thGrade);
-
 record TicketTypeResult(int ID, string Name, int Price);
+record AddTicketRequestDto(string FirstName, string LastName, int TicketTypeID, string? InvitationCode);
 
 class Student
 {
@@ -92,4 +250,18 @@ class PromContext : DbContext
     public DbSet<Purchase> Purchases => Set<Purchase>();
     public DbSet<TicketType> TicketTypes => Set<TicketType>();
     public DbSet<Ticket> Tickets => Set<Ticket>();
+}
+
+enum TicketTypeIDs
+{
+    Student = 3,
+    Teacher = 4,
+    TeacherOf5thGrade = 5,
+}
+
+enum MaxAllowedTicketsPerPerson
+{
+    Student = 3,
+    Teacher = 2,
+    TeacherOf5thGrade = 2,
 }
